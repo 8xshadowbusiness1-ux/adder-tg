@@ -1,10 +1,10 @@
-# (Full script — corrected)
 #!/usr/bin/env python3
 """
-ULTRA SAFE ADD BOT v3.2 — FIXED
-- Removed invalid 'exclusive' kw
-- Safe run_in_thread (pass function, not coroutine object)
-- Do NOT run /validate and /add at same time (avoid DB lock)
+ULTRA SAFE ADD BOT v3.3 — NO-VALIDATE MODE
+- Validation removed (direct add from only_ids.txt)
+- Safe thread runner
+- SQLiteSession without unsupported kw
+- Use /add to add directly from only_ids.txt (usernames with @ or numeric IDs)
 """
 import os, time, json, asyncio, random, threading, requests, traceback
 from telethon import TelegramClient
@@ -12,25 +12,22 @@ from telethon.sessions import SQLiteSession
 from telethon.errors import (
     SessionPasswordNeededError, FloodWaitError, AuthRestartError,
     UserPrivacyRestrictedError, UserAlreadyParticipantError,
-    UserBannedInChannelError, UsernameNotOccupiedError
+    UserBannedInChannelError
 )
 from telethon.tl.functions.channels import InviteToChannelRequest
 from flask import Flask
 
 # CONFIG
-API_ID = 18085901
-API_HASH = "baa5a6ca152c717e88ea45f888d3af74"
-PHONE = "+918436452250"
+API_ID = 22676464
+API_HASH = "b52406ee2c61546d8b560e2d009052d3"
+PHONE = "+917671914528"
 BOT_TOKEN = "8254353086:AAEMim12HX44q0XYaFWpbB3J7cxm4VWprEc"
 USER_CHAT_ID = 1602198875
 TARGET_GROUP = -1001823169797
-IDS_FILE = "only_ids.txt"
-CLEAN_IDS_FILE = "clean_ids.txt"
+IDS_FILE = "only_ids.txt"       # <-- Put usernames (with @) or numeric IDs here, one per line
 STATE_FILE = "add_state.json"
 PING_URL = "https://adder-tg.onrender.com"
 app = Flask(__name__)
-
-is_validating = False
 
 def log_print(msg):
     print(f"[LIVE] {msg}")
@@ -74,7 +71,7 @@ def run_in_thread(fn, *args, **kwargs):
             log_print(f"run_in_thread error: {e}")
     threading.Thread(target=_runner, daemon=True).start()
 
-# LOGIN helpers (use SQLiteSession WITHOUT 'exclusive' kw)
+# LOGIN helpers
 def tele_send_code():
     async def inner():
         session = SQLiteSession("safe_add_session")
@@ -126,68 +123,7 @@ def tele_sign_in_with_password(pwd):
     except Exception as e:
         return False, str(e)
 
-# VALIDATE
-async def validate_ids():
-    global is_validating
-    if is_validating:
-        bot_send("Already validating... please wait.")
-        return
-    is_validating = True
-    try:
-        session = SQLiteSession("safe_add_session")
-        c = TelegramClient(session, API_ID, API_HASH)
-        await c.connect()
-        if not await c.is_user_authorized():
-            bot_send("Not logged in!")
-            await c.disconnect()
-            is_validating = False
-            return
-
-        if not os.path.exists(IDS_FILE):
-            bot_send("IDs file not found!")
-            await c.disconnect()
-            is_validating = False
-            return
-
-        with open(IDS_FILE) as f:
-            all_ids = [line.strip() for line in f if line.strip()]
-        total = len(all_ids)
-        valid_ids, invalid = [], []
-
-        bot_send(f"Validating {total} entries... (this may take a while)")
-        for i, raw in enumerate(all_ids, 1):
-            uid = raw.strip()
-            if uid.startswith("@"):
-                try_id = uid
-            elif uid.isdigit():
-                try_id = int(uid)
-            else:
-                try_id = "@" + uid
-            try:
-                entity = await c.get_entity(try_id)
-                valid_ids.append(str(entity.id))
-            except Exception as e:
-                log_print(f"INVALID → {uid} | {e}")
-                invalid.append(uid)
-
-            if i % 100 == 0 or i == total:
-                bot_send(f"Validated {i}/{total} | Valid: {len(valid_ids)} | Invalid: {len(invalid)}")
-            await asyncio.sleep(random.uniform(0.4, 1.0))
-
-        with open(CLEAN_IDS_FILE, "w") as f:
-            for uid in valid_ids: f.write(uid + "\n")
-        with open("invalid_ids.txt", "w") as f:
-            for uid in invalid: f.write(uid + "\n")
-
-        bot_send(f"VALIDATION DONE ✅ Valid: {len(valid_ids)} | Invalid: {len(invalid)}")
-        s = load_state()
-        s.update({"last_index": 0, "added": 0, "failed": 0, "skipped": 0})
-        save_state(s)
-        await c.disconnect()
-    finally:
-        is_validating = False
-
-# ADD
+# ADD (direct from only_ids.txt) — supports @usernames or numeric IDs
 async def add_members():
     session = SQLiteSession("safe_add_session")
     c = TelegramClient(session, API_ID, API_HASH)
@@ -196,48 +132,76 @@ async def add_members():
         bot_send("Not logged in!")
         await c.disconnect()
         return
-    if not os.path.exists(CLEAN_IDS_FILE):
-        bot_send("Run /validate first!")
+    if not os.path.exists(IDS_FILE):
+        bot_send("IDs file not found! Create only_ids.txt with one username/ID per line.")
         await c.disconnect()
         return
 
-    with open(CLEAN_IDS_FILE) as f:
-        ids = [line.strip() for line in f if line.strip()]
+    with open(IDS_FILE) as f:
+        entries = [line.strip() for line in f if line.strip()]
     s = load_state()
-    total_ids = len(ids)
-    start_index = s.get("last_index", 0)
-    group = await c.get_entity(TARGET_GROUP)
+    total = len(entries)
+    start = s.get("last_index", 0)
 
-    for i in range(start_index, total_ids):
-        uid = int(ids[i])
+    try:
+        group = await c.get_entity(TARGET_GROUP)
+    except Exception as e:
+        bot_send(f"Can't find target group: {e}")
+        await c.disconnect()
+        return
+
+    for i in range(start, total):
+        raw = entries[i]
+        # Prepare identifier (username with @ or numeric id)
+        if raw.startswith("@"):
+            try_id = raw
+        elif raw.isdigit():
+            try_id = int(raw)
+        else:
+            try_id = "@" + raw
+
         try:
-            user = await c.get_entity(uid)
+            # Resolve user entity (this DOES call Telegram resolve — skipping validate does not avoid this)
+            user = await c.get_entity(try_id)
+            # Attempt to invite
             await c(InviteToChannelRequest(group, [user]))
             s["added"] += 1
-            log_print(f"ADDED {uid} → {s['added']}/{total_ids}")
-            bot_send(f"Added {s['added']} | Next: {i+1}/{total_ids}")
+            log_print(f"ADDED {raw} → {s['added']}/{total}")
+            bot_send(f"Added {s['added']} | Next: {i+1}/{total}")
         except UserAlreadyParticipantError:
             s["skipped"] += 1
+            log_print(f"SKIP (already): {raw}")
         except UserPrivacyRestrictedError:
             s["skipped"] += 1
+            log_print(f"SKIP (privacy): {raw}")
         except UserBannedInChannelError:
             s["skipped"] += 1
+            log_print(f"SKIP (banned): {raw}")
         except FloodWaitError as e:
-            wait_time = e.seconds + random.uniform(60, 120)
+            # If Telegram asks to wait, obey it
+            wait_time = e.seconds + random.uniform(30, 60)
             log_print(f"FLOODWAIT {e.seconds}s → sleeping {wait_time}s")
             await asyncio.sleep(wait_time)
+            # continue without incrementing index so this user will be retried next loop
+            s["last_index"] = i
+            save_state(s)
             continue
         except Exception as e:
             s["failed"] += 1
-            log_print(f"ADD FAIL {uid} → {e}")
+            log_print(f"ADD FAIL {raw} → {e}")
         finally:
             s["last_index"] = i + 1
             save_state(s)
-            delay = random.randint(s["min_delay"], s["max_delay"])
+            # Respect delay between invites to reduce risk
+            delay = random.randint(s.get("min_delay", 60), s.get("max_delay", 120))
+            log_print(f"Next in {delay}s... (Progress: {i+1}/{total})")
             bot_send(f"Next in {delay}s | Added: {s['added']} | Skipped: {s['skipped']} | Failed: {s['failed']}")
             await asyncio.sleep(delay)
 
     bot_send(f"✅ COMPLETE! Added: {s['added']} | Skipped: {s['skipped']} | Failed: {s['failed']}")
+    # reset position
+    s["last_index"] = 0
+    save_state(s)
     await c.disconnect()
 
 # PING
@@ -257,10 +221,14 @@ def start_ping_thread():
 def process_cmd(text):
     s = load_state()
     lower = text.lower().strip()
+
     if lower.startswith("/start"):
-        bot_send("Ready ✅ /login → /otp → /validate → /setdelay 60-120 → /add → /status"); return
+        bot_send("Ready ✅ /login → /otp → /setdelay 60-120 → /add → /status")
+        return
+
     if lower.startswith("/login"):
         tele_send_code(); return
+
     if lower.startswith("/otp"):
         p = text.split()
         if len(p) < 2: bot_send("Usage: /otp <code>"); return
@@ -268,17 +236,14 @@ def process_cmd(text):
         bot_send(msg)
         if need2fa: bot_send("Send /2fa <password>")
         return
+
     if lower.startswith("/2fa"):
         p = text.split(maxsplit=1)
         if len(p) < 2: bot_send("Usage: /2fa <password>"); return
         ok, msg = tele_sign_in_with_password(p[1])
         bot_send(msg)
         return
-    if lower.startswith("/validate"):
-        if not s.get("logged_in"):
-            bot_send("Login first!"); return
-        run_in_thread(validate_ids)
-        bot_send("Validating entries... (this may take several minutes)"); return
+
     if lower.startswith("/setdelay"):
         try:
             rng = lower.split()[1]; a,b = map(int, rng.split('-'))
@@ -288,15 +253,18 @@ def process_cmd(text):
         except:
             bot_send("Usage: /setdelay 60-120")
         return
+
     if lower.startswith("/add"):
         if not s.get("logged_in"):
             bot_send("Login first!"); return
-        # IMPORTANT: do NOT run /add while validate is running
         run_in_thread(add_members)
-        bot_send("Starting ultra safe add (Random delay, Skip already added, FloodWait 0%)"); return
+        bot_send("Starting ultra safe add (direct from only_ids.txt).")
+        return
+
     if lower.startswith("/status"):
-        msg = f"Added: {s['added']} | Skipped: {s['skipped']} | Failed: {s['failed']} | Delay: {s['min_delay']}-{s['max_delay']}s"
+        msg = f"Added: {s.get('added',0)} | Skipped: {s.get('skipped',0)} | Failed: {s.get('failed',0)} | Delay: {s.get('min_delay',60)}-{s.get('max_delay',120)}s"
         bot_send(msg); log_print(msg); return
+
     bot_send("Unknown command. Use /start")
 
 # MAIN LOOP
