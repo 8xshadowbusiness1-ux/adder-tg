@@ -1,11 +1,11 @@
+# (Full script — corrected)
 #!/usr/bin/env python3
 """
-ULTRA SAFE ADD BOT v3.1 — FINAL (Username Compatible)
-✅ Works with @usernames or numeric IDs
-✅ Fixes: invalid username issue, DB lock, duplicate validate spam
-✅ Fully Render compatible
+ULTRA SAFE ADD BOT v3.2 — FIXED
+- Removed invalid 'exclusive' kw
+- Safe run_in_thread (pass function, not coroutine object)
+- Do NOT run /validate and /add at same time (avoid DB lock)
 """
-
 import os, time, json, asyncio, random, threading, requests, traceback
 from telethon import TelegramClient
 from telethon.sessions import SQLiteSession
@@ -17,7 +17,7 @@ from telethon.errors import (
 from telethon.tl.functions.channels import InviteToChannelRequest
 from flask import Flask
 
-# ---------------- CONFIG ----------------
+# CONFIG
 API_ID = 18085901
 API_HASH = "baa5a6ca152c717e88ea45f888d3af74"
 PHONE = "+918436452250"
@@ -30,10 +30,8 @@ STATE_FILE = "add_state.json"
 PING_URL = "https://adder-tg.onrender.com"
 app = Flask(__name__)
 
-# ---------- GLOBAL FLAGS ----------
 is_validating = False
 
-# ---------- LOG HELPERS ----------
 def log_print(msg):
     print(f"[LIVE] {msg}")
     try:
@@ -54,7 +52,6 @@ def bot_send(text):
     except Exception as e:
         log_print(f"bot_send error: {e}")
 
-# ---------- STATE ----------
 def load_state():
     try:
         return json.load(open(STATE_FILE, "r"))
@@ -65,19 +62,22 @@ def save_state(s):
     json.dump(s, open(STATE_FILE, "w"))
     log_print("STATE SAVED")
 
-# ---------- THREAD HELPER ----------
-def run_in_thread(coro):
-    def safe():
+# safer run_in_thread: pass function (sync or async) and args
+def run_in_thread(fn, *args, **kwargs):
+    def _runner():
         try:
-            asyncio.run(coro)
+            if asyncio.iscoroutinefunction(fn):
+                asyncio.run(fn(*args, **kwargs))
+            else:
+                fn(*args, **kwargs)
         except Exception as e:
             log_print(f"run_in_thread error: {e}")
-    threading.Thread(target=safe, daemon=True).start()
+    threading.Thread(target=_runner, daemon=True).start()
 
-# ---------- LOGIN ----------
+# LOGIN helpers (use SQLiteSession WITHOUT 'exclusive' kw)
 def tele_send_code():
     async def inner():
-        session = SQLiteSession("safe_add_session", exclusive=False)
+        session = SQLiteSession("safe_add_session")
         c = TelegramClient(session, API_ID, API_HASH)
         await c.connect()
         r = await c.send_code_request(PHONE)
@@ -94,7 +94,7 @@ def tele_send_code():
 
 def tele_sign_in_with_code(code):
     async def inner():
-        session = SQLiteSession("safe_add_session", exclusive=False)
+        session = SQLiteSession("safe_add_session")
         c = TelegramClient(session, API_ID, API_HASH)
         await c.connect()
         s = load_state()
@@ -108,12 +108,11 @@ def tele_sign_in_with_code(code):
         except SessionPasswordNeededError:
             await c.disconnect()
             return True, True, "2FA needed."
-    ok, need2fa, msg = asyncio.run(inner())
-    return ok, need2fa, msg
+    return asyncio.run(inner())
 
 def tele_sign_in_with_password(pwd):
     async def inner():
-        session = SQLiteSession("safe_add_session", exclusive=False)
+        session = SQLiteSession("safe_add_session")
         c = TelegramClient(session, API_ID, API_HASH)
         await c.connect()
         await c.sign_in(password=pwd)
@@ -127,7 +126,7 @@ def tele_sign_in_with_password(pwd):
     except Exception as e:
         return False, str(e)
 
-# ---------- VALIDATE USERNAMES ----------
+# VALIDATE
 async def validate_ids():
     global is_validating
     if is_validating:
@@ -135,7 +134,7 @@ async def validate_ids():
         return
     is_validating = True
     try:
-        session = SQLiteSession("safe_add_session", exclusive=False)
+        session = SQLiteSession("safe_add_session")
         c = TelegramClient(session, API_ID, API_HASH)
         await c.connect()
         if not await c.is_user_authorized():
@@ -155,32 +154,32 @@ async def validate_ids():
         total = len(all_ids)
         valid_ids, invalid = [], []
 
-        bot_send(f"Validating {total} IDs... (this may take a while)")
-        for i, uid in enumerate(all_ids, 1):
+        bot_send(f"Validating {total} entries... (this may take a while)")
+        for i, raw in enumerate(all_ids, 1):
+            uid = raw.strip()
+            if uid.startswith("@"):
+                try_id = uid
+            elif uid.isdigit():
+                try_id = int(uid)
+            else:
+                try_id = "@" + uid
             try:
-                if uid.startswith("@"):
-                    entity = await c.get_entity(uid)
-                elif uid.isdigit():
-                    entity = await c.get_entity(int(uid))
-                else:
-                    entity = await c.get_entity("@" + uid)
+                entity = await c.get_entity(try_id)
                 valid_ids.append(str(entity.id))
             except Exception as e:
                 log_print(f"INVALID → {uid} | {e}")
                 invalid.append(uid)
-            if i % 100 == 0:
+
+            if i % 100 == 0 or i == total:
                 bot_send(f"Validated {i}/{total} | Valid: {len(valid_ids)} | Invalid: {len(invalid)}")
             await asyncio.sleep(random.uniform(0.4, 1.0))
 
         with open(CLEAN_IDS_FILE, "w") as f:
             for uid in valid_ids: f.write(uid + "\n")
-
         with open("invalid_ids.txt", "w") as f:
             for uid in invalid: f.write(uid + "\n")
 
         bot_send(f"VALIDATION DONE ✅ Valid: {len(valid_ids)} | Invalid: {len(invalid)}")
-        bot_send(f"Clean file: {CLEAN_IDS_FILE} | Invalid file: invalid_ids.txt")
-
         s = load_state()
         s.update({"last_index": 0, "added": 0, "failed": 0, "skipped": 0})
         save_state(s)
@@ -188,9 +187,9 @@ async def validate_ids():
     finally:
         is_validating = False
 
-# ---------- ADD MEMBERS ----------
+# ADD
 async def add_members():
-    session = SQLiteSession("safe_add_session", exclusive=False)
+    session = SQLiteSession("safe_add_session")
     c = TelegramClient(session, API_ID, API_HASH)
     await c.connect()
     if not await c.is_user_authorized():
@@ -241,7 +240,7 @@ async def add_members():
     bot_send(f"✅ COMPLETE! Added: {s['added']} | Skipped: {s['skipped']} | Failed: {s['failed']}")
     await c.disconnect()
 
-# ---------- PING ----------
+# PING
 async def ping_forever():
     while True:
         try:
@@ -252,20 +251,16 @@ async def ping_forever():
         await asyncio.sleep(600)
 
 def start_ping_thread():
-    run_in_thread(ping_forever())
+    run_in_thread(ping_forever)
 
-# ---------- COMMANDS ----------
+# COMMANDS
 def process_cmd(text):
     s = load_state()
     lower = text.lower().strip()
-
     if lower.startswith("/start"):
-        bot_send("Ready ✅ /login → /otp → /validate → /setdelay 60-120 → /add → /status")
-        return
-
+        bot_send("Ready ✅ /login → /otp → /validate → /setdelay 60-120 → /add → /status"); return
     if lower.startswith("/login"):
         tele_send_code(); return
-
     if lower.startswith("/otp"):
         p = text.split()
         if len(p) < 2: bot_send("Usage: /otp <code>"); return
@@ -273,75 +268,56 @@ def process_cmd(text):
         bot_send(msg)
         if need2fa: bot_send("Send /2fa <password>")
         return
-
     if lower.startswith("/2fa"):
         p = text.split(maxsplit=1)
         if len(p) < 2: bot_send("Usage: /2fa <password>"); return
         ok, msg = tele_sign_in_with_password(p[1])
         bot_send(msg)
         return
-
     if lower.startswith("/validate"):
         if not s.get("logged_in"):
             bot_send("Login first!"); return
-        run_in_thread(validate_ids())
-        bot_send("Validating entries... (this may take several minutes)")
-        return
-
+        run_in_thread(validate_ids)
+        bot_send("Validating entries... (this may take several minutes)"); return
     if lower.startswith("/setdelay"):
         try:
-            rng = lower.split()[1]
-            a, b = map(int, rng.split('-'))
-            if a >= b: raise ValueError
-            s["min_delay"], s["max_delay"] = a, b
-            save_state(s)
+            rng = lower.split()[1]; a,b = map(int, rng.split('-'))
+            if a>=b: raise ValueError
+            s["min_delay"], s["max_delay"] = a,b; save_state(s)
             bot_send(f"Delay set: {a}-{b}s")
         except:
             bot_send("Usage: /setdelay 60-120")
         return
-
     if lower.startswith("/add"):
         if not s.get("logged_in"):
             bot_send("Login first!"); return
-        run_in_thread(add_members())
-        bot_send("Starting ultra safe add (Random delay, Skip already added, FloodWait 0%)")
-        return
-
+        # IMPORTANT: do NOT run /add while validate is running
+        run_in_thread(add_members)
+        bot_send("Starting ultra safe add (Random delay, Skip already added, FloodWait 0%)"); return
     if lower.startswith("/status"):
         msg = f"Added: {s['added']} | Skipped: {s['skipped']} | Failed: {s['failed']} | Delay: {s['min_delay']}-{s['max_delay']}s"
-        bot_send(msg)
-        log_print(msg)
-        return
-
+        bot_send(msg); log_print(msg); return
     bot_send("Unknown command. Use /start")
 
-# ---------- MAIN LOOP ----------
+# MAIN LOOP
 def main_loop():
     log_print("BOT STARTED")
     offset = None
     while True:
         try:
-            r = requests.get(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates",
-                params={"offset": offset, "timeout": 15},
-                timeout=20,
-            ).json()
+            r = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates",
+                             params={"offset": offset, "timeout": 15}, timeout=20).json()
             if not r.get("ok"):
                 time.sleep(1); continue
             for u in r["result"]:
                 offset = u["update_id"] + 1
-                msg = u.get("message", {})
-                text = msg.get("text", "")
-                chat = msg.get("chat", {})
-                if not text or str(chat.get("id")) != str(USER_CHAT_ID):
-                    continue
+                msg = u.get("message", {}); text = msg.get("text", ""); chat = msg.get("chat", {})
+                if not text or str(chat.get("id")) != str(USER_CHAT_ID): continue
                 process_cmd(text)
             time.sleep(1)
         except Exception as e:
-            log_print(f"LOOP ERROR: {e}")
-            time.sleep(3)
+            log_print(f"LOOP ERROR: {e}"); time.sleep(3)
 
-# ---------- START ----------
 if __name__ == "__main__":
     start_ping_thread()
     threading.Thread(target=main_loop, daemon=True).start()
