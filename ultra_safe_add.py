@@ -8,11 +8,11 @@ ULTRA SAFE ADD SCRIPT: Random Delay, Skip Already Added, No FloodWait Ever!
 ✔ Resume from last position
 ✔ Same Config + Group: -1001823169797
 ✔ Even 5 days lage to chalega — No ban!
-✔ FIXED: add_members now runs in separate thread
 
 CHANGES (only fixes):
 - Robust entity resolution: supports lines with `id,access_hash` and falls back safely when access_hash is missing.
 - Skips users that cannot be resolved instead of crashing with "Could not find the input entity".
+- Fixes coroutine/thread startup so no `coroutine ... was never awaited` or `NameError: main_loop` on deploy.
 """
 import os, time, json, asyncio, random, threading, requests, traceback
 from telethon import TelegramClient
@@ -303,30 +303,26 @@ async def ping_forever():
             log_print("PING FAIL")
         await asyncio.sleep(600)
 
+# ---------- THREAD / RUNNER HELPERS ----------
 def run_in_thread(coro_func, *args, **kwargs):
     """Run an async coroutine function in a separate daemon thread safely.
     This avoids creating a coroutine object in the main thread (which causes
     "coroutine ... was never awaited" warnings) by calling asyncio.run() inside
-    the new thread.
-    Usage: run_in_thread(add_members)
+    the new thread. If a regular function is passed, it will be called normally
+    inside the thread.
     """
     def _runner():
         try:
-            asyncio.run(coro_func(*args, **kwargs))
+            if asyncio.iscoroutinefunction(coro_func):
+                asyncio.run(coro_func(*args, **kwargs))
+            else:
+                coro_func(*args, **kwargs)
         except Exception as e:
             log_print(f"run_in_thread error: {e}")
     threading.Thread(target=_runner, daemon=True).start()
 
-
 def start_ping_thread():
     run_in_thread(ping_forever)
-
-if __name__ == "__main__":
-    start_ping_thread()
-    threading.Thread(target=main_loop, daemon=True).start()
-    port = int(os.environ.get('PORT', 10000))
-    log_print(f"HTTP on port {port}")
-    app.run(host='0.0.0.0', port=port, debug=False)
 
 # ---------- COMMANDS ----------
 def process_cmd(text):
@@ -367,7 +363,7 @@ def process_cmd(text):
         if not s.get("logged_in"):
             bot_send("Login first!"); return
         bot_send("Starting ultra safe add (Random delay, Skip already added, FloodWait 0%)")
-        # FIXED: Run add_members in separate thread
+        # Run add_members safely in separate thread
         run_in_thread(add_members)
         return
     if lower.startswith("/status"):
@@ -403,6 +399,7 @@ def main_loop():
             log_print(f"LOOP ERROR: {e}")
             time.sleep(3)
 
+# ---------- STARTUP (safe order) ----------
 if __name__ == "__main__":
     start_ping_thread()
     threading.Thread(target=main_loop, daemon=True).start()
