@@ -9,6 +9,10 @@ ULTRA SAFE ADD SCRIPT: Random Delay, Skip Already Added, No FloodWait Ever!
 ✔ Same Config + Group: -1001823169797
 ✔ Even 5 days lage to chalega — No ban!
 ✔ FIXED: add_members now runs in separate thread
+
+CHANGES (only fixes):
+- Robust entity resolution: supports lines with `id,access_hash` and falls back safely when access_hash is missing.
+- Skips users that cannot be resolved instead of crashing with "Could not find the input entity".
 """
 import os, time, json, asyncio, random, threading, requests, traceback
 from telethon import TelegramClient
@@ -18,6 +22,7 @@ from telethon.errors import (
     UserBannedInChannelError
 )
 from telethon.tl.functions.channels import InviteToChannelRequest
+from telethon.tl.types import InputPeerUser
 from flask import Flask
 
 # ---------------- CONFIG (SAME) ----------------
@@ -163,8 +168,32 @@ async def add_members():
         bot_send("IDs file not found!")
         await c.disconnect()
         return
+
+    # Read IDs file. Supports lines like:
+    # 123456789
+    # 123456789,9876543210987654321  <-- id,access_hash
+    ids = []
     with open(IDS_FILE) as f:
-        ids = [line.strip() for line in f if line.strip()]
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            if ',' in line:
+                parts = [p.strip() for p in line.split(',')]
+                try:
+                    uid = int(parts[0])
+                    access_hash = int(parts[1]) if len(parts) > 1 and parts[1] else None
+                    ids.append((uid, access_hash))
+                except Exception as e:
+                    log_print(f"Invalid line in IDs file: {line} ({e})")
+            else:
+                try:
+                    uid = int(line)
+                    ids.append((uid, None))
+                except Exception:
+                    # maybe it's a username like @user; store as-is
+                    ids.append((line, None))
+
     total_ids = len(ids)
     start_index = s.get("last_index", 0)
     min_delay = s.get("min_delay", 60)
@@ -173,52 +202,92 @@ async def add_members():
     failed = s.get("failed", 0)
     skipped = s.get("skipped", 0)
     group = await c.get_entity(TARGET_GROUP)
+
     for i in range(start_index, total_ids):
-        uid = int(ids[i])
+        raw_uid, access_hash = ids[i]
+        # Resolve target user robustly
         try:
-            user = await c.get_entity(uid)
+            if isinstance(raw_uid, int):
+                # If we have access_hash, build InputPeerUser directly
+                if access_hash:
+                    user_input = InputPeerUser(raw_uid, access_hash)
+                else:
+                    # Try to get input entity (works if cached or resolvable)
+                    try:
+                        user_input = await c.get_input_entity(raw_uid)
+                    except Exception:
+                        # Try get_entity as a last-ditch attempt
+                        try:
+                            user_input = await c.get_entity(raw_uid)
+                        except Exception as e:
+                            log_print(f"Entity error {raw_uid}: {e}")
+                            failed += 1
+                            s["failed"] = failed
+                            s["last_index"] = i + 1
+                            save_state(s)
+                            continue
+            else:
+                # raw_uid might be a username string like @username
+                try:
+                    user_input = await c.get_input_entity(raw_uid)
+                except Exception:
+                    try:
+                        user_input = await c.get_entity(raw_uid)
+                    except Exception as e:
+                        log_print(f"Entity error {raw_uid}: {e}")
+                        failed += 1
+                        s["failed"] = failed
+                        s["last_index"] = i + 1
+                        save_state(s)
+                        continue
+
+            # Attempt to invite
             try:
-                await c(InviteToChannelRequest(group, [user]))
+                await c(InviteToChannelRequest(group, [user_input]))
                 added += 1
-                log_print(f"ADDED {uid} → Total: {added}/{total_ids}")
+                log_print(f"ADDED {raw_uid} → Total: {added}/{total_ids}")
                 bot_send(f"Added: {added} | Next: {i+1}/{total_ids}")
             except UserAlreadyParticipantError:
                 skipped += 1
-                log_print(f"SKIP (already added): {uid}")
+                log_print(f"SKIP (already added): {raw_uid}")
             except UserPrivacyRestrictedError:
                 skipped += 1
-                log_print(f"SKIP (privacy): {uid}")
+                log_print(f"SKIP (privacy): {raw_uid}")
             except UserBannedInChannelError:
                 skipped += 1
-                log_print(f"SKIP (banned): {uid}")
+                log_print(f"SKIP (banned): {raw_uid}")
             except FloodWaitError as e:
                 wait_time = e.seconds + random.uniform(60, 120)  # Extra random
                 log_print(f"FLOODWAIT {e.seconds}s → Waiting {wait_time}s + retry")
                 await asyncio.sleep(wait_time)
-                # Retry this user
+                # Retry this user once
                 try:
-                    await c(InviteToChannelRequest(group, [user]))
+                    await c(InviteToChannelRequest(group, [user_input]))
                     added += 1
-                    log_print(f"RETRY ADDED {uid}")
-                except:
+                    log_print(f"RETRY ADDED {raw_uid}")
+                except Exception as e:
                     failed += 1
-                    log_print(f"Retry failed {uid}")
+                    log_print(f"Retry failed {raw_uid}: {e}")
             except Exception as e:
                 failed += 1
-                log_print(f"Failed {uid}: {e}")
+                log_print(f"Failed {raw_uid}: {e}")
+
         except Exception as e:
             failed += 1
-            log_print(f"Entity error {uid}: {e}")
+            log_print(f"Entity resolution unexpected error {raw_uid}: {e}")
+
         s["added"] = added
         s["failed"] = failed
         s["skipped"] = skipped
         s["last_index"] = i + 1
         save_state(s)
+
         # Random delay (min-max)
         delay = random.randint(min_delay, max_delay)
         log_print(f"Next in {delay}s... (Progress: {i+1}/{total_ids})")
         bot_send(f"Next in {delay}s | Added: {added} | Skipped: {skipped} | Failed: {failed}")
         await asyncio.sleep(delay)
+
     bot_send(f"COMPLETE! Added: {added} | Skipped: {skipped} | Failed: {failed}")
     s["last_index"] = 0
     save_state(s)
