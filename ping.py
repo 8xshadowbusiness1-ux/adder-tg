@@ -2,7 +2,7 @@ import requests
 import time
 import threading
 
-PING_URL = "https://your-bot-name.onrender.com"  # ← TUMHARA RENDER URL
+PING_URL = "https://adder-tg.onrender.com"  # ← TUMHARA RENDER URL
 
 def ping_forever():
     while True:
