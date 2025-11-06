@@ -8,6 +8,7 @@ ULTRA SAFE ADD SCRIPT: Random Delay, Skip Already Added, No FloodWait Ever!
 ✔ Resume from last position
 ✔ Same Config + Group: -1001823169797
 ✔ Even 5 days lage to chalega — No ban!
+✔ FIXED: add_members now runs in separate thread
 """
 import os, time, json, asyncio, random, threading, requests, traceback
 from telethon import TelegramClient
@@ -157,13 +158,11 @@ async def add_members():
         bot_send("Not logged in!")
         await c.disconnect()
         return
-
     s = load_state()
     if not os.path.exists(IDS_FILE):
         bot_send("IDs file not found!")
         await c.disconnect()
         return
-
     with open(IDS_FILE) as f:
         ids = [line.strip() for line in f if line.strip()]
     total_ids = len(ids)
@@ -173,9 +172,7 @@ async def add_members():
     added = s.get("added", 0)
     failed = s.get("failed", 0)
     skipped = s.get("skipped", 0)
-
     group = await c.get_entity(TARGET_GROUP)
-
     for i in range(start_index, total_ids):
         uid = int(ids[i])
         try:
@@ -209,23 +206,19 @@ async def add_members():
             except Exception as e:
                 failed += 1
                 log_print(f"Failed {uid}: {e}")
-
         except Exception as e:
             failed += 1
             log_print(f"Entity error {uid}: {e}")
-
         s["added"] = added
         s["failed"] = failed
         s["skipped"] = skipped
         s["last_index"] = i + 1
         save_state(s)
-
         # Random delay (min-max)
         delay = random.randint(min_delay, max_delay)
         log_print(f"Next in {delay}s... (Progress: {i+1}/{total_ids})")
         bot_send(f"Next in {delay}s | Added: {added} | Skipped: {skipped} | Failed: {failed}")
         await asyncio.sleep(delay)
-
     bot_send(f"COMPLETE! Added: {added} | Skipped: {skipped} | Failed: {failed}")
     s["last_index"] = 0
     save_state(s)
@@ -283,7 +276,8 @@ def process_cmd(text):
         if not s.get("logged_in"):
             bot_send("Login first!"); return
         bot_send("Starting ultra safe add (Random delay, Skip already added, FloodWait 0%)")
-        asyncio.create_task(add_members())  # Async so bot doesn't block
+        # FIXED: Run add_members in separate thread
+        threading.Thread(target=lambda: asyncio.run(add_members()), daemon=True).start()
         return
     if lower.startswith("/status"):
         status = f"Added: {s.get('added', 0)} | Failed: {s.get('failed', 0)} | Skipped: {s.get('skipped', 0)} | Delay: {s.get('min_delay', 60)}-{s.get('max_delay', 120)}s"
