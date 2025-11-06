@@ -28,7 +28,7 @@ USER_CHAT_ID = 1602198875
 TARGET_GROUP = -1001823169797  # ← YE GROUP
 IDS_FILE = "only_ids.txt"  # ← IDs wala file
 STATE_FILE = "add_state.json"
-PING_URL = "https://tele-id-export.onrender.com"
+PING_URL = "https://adder-tg.onrender.com"
 app = Flask(__name__)
 
 @app.route('/')
