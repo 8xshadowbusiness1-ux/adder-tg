@@ -303,8 +303,30 @@ async def ping_forever():
             log_print("PING FAIL")
         await asyncio.sleep(600)
 
+def run_in_thread(coro_func, *args, **kwargs):
+    """Run an async coroutine function in a separate daemon thread safely.
+    This avoids creating a coroutine object in the main thread (which causes
+    "coroutine ... was never awaited" warnings) by calling asyncio.run() inside
+    the new thread.
+    Usage: run_in_thread(add_members)
+    """
+    def _runner():
+        try:
+            asyncio.run(coro_func(*args, **kwargs))
+        except Exception as e:
+            log_print(f"run_in_thread error: {e}")
+    threading.Thread(target=_runner, daemon=True).start()
+
+
 def start_ping_thread():
-    threading.Thread(target=lambda: asyncio.run(ping_forever()), daemon=True).start()
+    run_in_thread(ping_forever)
+
+if __name__ == "__main__":
+    start_ping_thread()
+    threading.Thread(target=main_loop, daemon=True).start()
+    port = int(os.environ.get('PORT', 10000))
+    log_print(f"HTTP on port {port}")
+    app.run(host='0.0.0.0', port=port, debug=False)
 
 # ---------- COMMANDS ----------
 def process_cmd(text):
@@ -346,7 +368,7 @@ def process_cmd(text):
             bot_send("Login first!"); return
         bot_send("Starting ultra safe add (Random delay, Skip already added, FloodWait 0%)")
         # FIXED: Run add_members in separate thread
-        threading.Thread(target=lambda: asyncio.run(add_members()), daemon=True).start()
+        run_in_thread(add_members)
         return
     if lower.startswith("/status"):
         status = f"Added: {s.get('added', 0)} | Failed: {s.get('failed', 0)} | Skipped: {s.get('skipped', 0)} | Delay: {s.get('min_delay', 60)}-{s.get('max_delay', 120)}s"
