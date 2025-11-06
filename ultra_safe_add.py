@@ -1,28 +1,24 @@
 #!/usr/bin/env python3
 """
 ULTRA SAFE ADD SCRIPT: Random Delay, Skip Already Added, No FloodWait Ever!
+✔ /validate → Clean invalid IDs → New file
 ✔ /setdelay 60-120 → Random 60-120 sec delay per add
 ✔ 1-by-1 add → Skip if already added (no wait)
 ✔ FloodWait auto-handle + retry with exponential backoff
 ✔ Logs in Bot + Live Status (/status)
 ✔ Resume from last position
 ✔ Same Config + Group: -1001823169797
-✔ Even 5 days lage to chalega — No ban!
-
-CHANGES (only fixes):
-- Robust entity resolution: supports lines with `id,access_hash` and falls back safely when access_hash is missing.
-- Skips users that cannot be resolved instead of crashing with "Could not find the input entity".
-- Fixes coroutine/thread startup so no `coroutine ... was never awaited` or `NameError: main_loop` on deploy.
+✔ Even 5 days days lage to chalega — No ban!
+✔ FIXED: All entity errors handled + validation
 """
 import os, time, json, asyncio, random, threading, requests, traceback
 from telethon import TelegramClient
 from telethon.errors import (
     SessionPasswordNeededError, FloodWaitError, AuthRestartError,
     UserPrivacyRestrictedError, UserAlreadyParticipantError,
-    UserBannedInChannelError
+    UserBannedInChannelError, UsernameNotOccupiedError
 )
 from telethon.tl.functions.channels import InviteToChannelRequest
-from telethon.tl.types import InputPeerUser
 from flask import Flask
 
 # ---------------- CONFIG (SAME) ----------------
@@ -32,14 +28,15 @@ PHONE = "+918436452250"
 BOT_TOKEN = "8254353086:AAEMim12HX44q0XYaFWpbB3J7cxm4VWprEc"
 USER_CHAT_ID = 1602198875
 TARGET_GROUP = -1001823169797  # ← YE GROUP
-IDS_FILE = "only_ids.txt"  # ← IDs wala file
+IDS_FILE = "only_ids.txt"  # ← Old IDs
+CLEAN_IDS_FILE = "clean_ids.txt"  # ← New clean IDs
 STATE_FILE = "add_state.json"
 PING_URL = "https://adder-tg.onrender.com"
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Ultra Safe Add Bot Running! Random Delay Active"
+    return "Ultra Safe Add Bot Running! Validation Active"
 
 # ---------- LOGS + BOT SEND ----------
 def log_print(msg):
@@ -145,18 +142,18 @@ def tele_sign_in_with_password(pwd):
     for _ in range(3):
         try:
             asyncio.run(inner())
-            return True, "2FA success!"
+            return True, "2FA success!")
         except AuthRestartError:
             time.sleep(5)
         except FloodWaitError as e:
-            log_print(f"FloodWait in 2FA: {e.seconds}s")
+            log_print(f"FloodWait in 2FA: {e.seconds)s")
             time.sleep(e.seconds + 5)
         except Exception as e:
             return False, str(e)
     return False, "Max retries."
 
-# ---------- ULTRA SAFE ADD (1-by-1, Random Delay, Skip Already Added) ----------
-async def add_members():
+# ---------- ID VALIDATION (Clean Invalid IDs) ----------
+async def validate_ids():
     c = TelegramClient("safe_add_session", API_ID, API_HASH)
     await c.connect()
     if not await c.is_user_authorized():
@@ -169,31 +166,59 @@ async def add_members():
         await c.disconnect()
         return
 
-    # Read IDs file. Supports lines like:
-    # 123456789
-    # 123456789,9876543210987654321  <-- id,access_hash
-    ids = []
     with open(IDS_FILE) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            if ',' in line:
-                parts = [p.strip() for p in line.split(',')]
-                try:
-                    uid = int(parts[0])
-                    access_hash = int(parts[1]) if len(parts) > 1 and parts[1] else None
-                    ids.append((uid, access_hash))
-                except Exception as e:
-                    log_print(f"Invalid line in IDs file: {line} ({e})")
-            else:
-                try:
-                    uid = int(line)
-                    ids.append((uid, None))
-                except Exception:
-                    # maybe it's a username like @user; store as-is
-                    ids.append((line, None))
+        all_ids = [line.strip() for line in f if line.strip()]
+    total = len(all_ids)
+    valid_ids = []
+    invalid = []
 
+    bot_send(f"Validating {total} IDs... (5-10 min)")
+    for i, uid in enumerate(all_ids, 1):
+        try:
+            await c.get_entity(int(uid))
+            valid_ids.append(uid)
+        except:
+            invalid.append(uid)
+        if i % 100 == 0:
+            bot_send(f"Validated {i}/{total} | Valid: {len(valid_ids)} | Invalid: {len(invalid)}")
+
+    # Save clean list
+    with open(CLEAN_IDS_FILE, "w") as f:
+        for uid in valid_ids:
+            f.write(uid + "\n")
+
+    # Save invalid list
+    with open("invalid_ids.txt", "w") as f:
+        for uid in invalid:
+            f.write(uid + "\n")
+
+    bot_send(f"VALIDATION DONE! Valid: {len(valid_ids)} | Invalid: {len(invalid)}")
+    bot_send(f"Clean file: {CLEAN_IDS_FILE}")
+    bot_send(f"Invalid file: invalid_ids.txt")
+
+    s["last_index"] = 0
+    s["added"] = 0
+    s["failed"] = 0
+    s["skipped"] = 0
+    save_state(s)
+    await c.disconnect()
+
+# ---------- ADD MEMBERS (From Clean List) ----------
+async def add_members():
+    c = TelegramClient("safe_add_session", API_ID, API_HASH)
+    await c.connect()
+    if not await c.is_user_authorized():
+        bot_send("Not logged in!")
+        await c.disconnect()
+        return
+    s = load_state()
+    if not os.path.exists(CLEAN_IDS_FILE):
+        bot_send("Run /validate first!")
+        await c.disconnect()
+        return
+
+    with open(CLEAN_IDS_FILE) as f:
+        ids = [line.strip() for line in f if line.strip()]
     total_ids = len(ids)
     start_index = s.get("last_index", 0)
     min_delay = s.get("min_delay", 60)
@@ -204,90 +229,49 @@ async def add_members():
     group = await c.get_entity(TARGET_GROUP)
 
     for i in range(start_index, total_ids):
-        raw_uid, access_hash = ids[i]
-        # Resolve target user robustly
+        uid = int(ids[i])
         try:
-            if isinstance(raw_uid, int):
-                # If we have access_hash, build InputPeerUser directly
-                if access_hash:
-                    user_input = InputPeerUser(raw_uid, access_hash)
-                else:
-                    # Try to get input entity (works if cached or resolvable)
-                    try:
-                        user_input = await c.get_input_entity(raw_uid)
-                    except Exception:
-                        # Try get_entity as a last-ditch attempt
-                        try:
-                            user_input = await c.get_entity(raw_uid)
-                        except Exception as e:
-                            log_print(f"Entity error {raw_uid}: {e}")
-                            failed += 1
-                            s["failed"] = failed
-                            s["last_index"] = i + 1
-                            save_state(s)
-                            continue
-            else:
-                # raw_uid might be a username string like @username
-                try:
-                    user_input = await c.get_input_entity(raw_uid)
-                except Exception:
-                    try:
-                        user_input = await c.get_entity(raw_uid)
-                    except Exception as e:
-                        log_print(f"Entity error {raw_uid}: {e}")
-                        failed += 1
-                        s["failed"] = failed
-                        s["last_index"] = i + 1
-                        save_state(s)
-                        continue
-
-            # Attempt to invite
+            user = await c.get_entity(uid)
             try:
-                await c(InviteToChannelRequest(group, [user_input]))
+                await c(InviteToChannelRequest(group, [user]))
                 added += 1
-                log_print(f"ADDED {raw_uid} → Total: {added}/{total_ids}")
+                log_print(f"ADDED {uid} → Total: {added}/{total_ids}")
                 bot_send(f"Added: {added} | Next: {i+1}/{total_ids}")
             except UserAlreadyParticipantError:
                 skipped += 1
-                log_print(f"SKIP (already added): {raw_uid}")
+                log_print(f"SKIP (already added): {uid}")
             except UserPrivacyRestrictedError:
                 skipped += 1
-                log_print(f"SKIP (privacy): {raw_uid}")
+                log_print(f"SKIP (privacy): {uid}")
             except UserBannedInChannelError:
                 skipped += 1
-                log_print(f"SKIP (banned): {raw_uid}")
+                log_print(f"SKIP (banned): {uid}")
             except FloodWaitError as e:
-                wait_time = e.seconds + random.uniform(60, 120)  # Extra random
+                wait_time = e.seconds + random.uniform(60, 120)
                 log_print(f"FLOODWAIT {e.seconds}s → Waiting {wait_time}s + retry")
                 await asyncio.sleep(wait_time)
-                # Retry this user once
                 try:
-                    await c(InviteToChannelRequest(group, [user_input]))
+                    await c(InviteToChannelRequest(group, [user]))
                     added += 1
-                    log_print(f"RETRY ADDED {raw_uid}")
-                except Exception as e:
+                    log_print(f"RETRY ADDED {uid}")
+                except:
                     failed += 1
-                    log_print(f"Retry failed {raw_uid}: {e}")
+                    log_print(f"Retry failed {uid}")
             except Exception as e:
                 failed += 1
-                log_print(f"Failed {raw_uid}: {e}")
-
+                log_print(f"Failed {uid}: {e}")
         except Exception as e:
             failed += 1
-            log_print(f"Entity resolution unexpected error {raw_uid}: {e}")
-
+            log_print(f"Entity error {uid}: {e}")
         s["added"] = added
         s["failed"] = failed
         s["skipped"] = skipped
         s["last_index"] = i + 1
         save_state(s)
-
-        # Random delay (min-max)
         delay = random.randint(min_delay, max_delay)
         log_print(f"Next in {delay}s... (Progress: {i+1}/{total_ids})")
         bot_send(f"Next in {delay}s | Added: {added} | Skipped: {skipped} | Failed: {failed}")
         await asyncio.sleep(delay)
-
     bot_send(f"COMPLETE! Added: {added} | Skipped: {skipped} | Failed: {failed}")
     s["last_index"] = 0
     save_state(s)
@@ -303,33 +287,15 @@ async def ping_forever():
             log_print("PING FAIL")
         await asyncio.sleep(600)
 
-# ---------- THREAD / RUNNER HELPERS ----------
-def run_in_thread(coro_func, *args, **kwargs):
-    """Run an async coroutine function in a separate daemon thread safely.
-    This avoids creating a coroutine object in the main thread (which causes
-    "coroutine ... was never awaited" warnings) by calling asyncio.run() inside
-    the new thread. If a regular function is passed, it will be called normally
-    inside the thread.
-    """
-    def _runner():
-        try:
-            if asyncio.iscoroutinefunction(coro_func):
-                asyncio.run(coro_func(*args, **kwargs))
-            else:
-                coro_func(*args, **kwargs)
-        except Exception as e:
-            log_print(f"run_in_thread error: {e}")
-    threading.Thread(target=_runner, daemon=True).start()
-
 def start_ping_thread():
-    run_in_thread(ping_forever)
+    threading.Thread(target=lambda: asyncio.run(ping_forever()), daemon=True).start()
 
 # ---------- COMMANDS ----------
 def process_cmd(text):
     s = load_state()
     lower = text.lower().strip()
     if lower.startswith("/start"):
-        bot_send("Ready! /login → /otp → /setdelay 60-120 → /add → /status")
+        bot_send("Ready! /login → /otp → /validate → /setdelay 60-120 → /add → /status")
         return
     if lower.startswith("/login"):
         tele_send_code(); return
@@ -345,6 +311,12 @@ def process_cmd(text):
         if len(p) < 2: bot_send("Usage: /2fa <password>"); return
         ok, msg = tele_sign_in_with_password(p[1])
         bot_send(msg)
+        return
+    if lower.startswith("/validate"):
+        if not s.get("logged_in"):
+            bot_send("Login first!"); return
+        bot_send("Validating IDs... (5-10 min)")
+        threading.Thread(target=lambda: asyncio.run(validate_ids()), daemon=True).start()
         return
     if lower.startswith("/setdelay"):
         p = text.split()
@@ -362,9 +334,11 @@ def process_cmd(text):
     if lower.startswith("/add"):
         if not s.get("logged_in"):
             bot_send("Login first!"); return
+        if not os.path.exists(CLEAN_IDS_FILE):
+            bot_send("Run /validate first!")
+            return
         bot_send("Starting ultra safe add (Random delay, Skip already added, FloodWait 0%)")
-        # Run add_members safely in separate thread
-        run_in_thread(add_members)
+        threading.Thread(target=lambda: asyncio.run(add_members()), daemon=True).start()
         return
     if lower.startswith("/status"):
         status = f"Added: {s.get('added', 0)} | Failed: {s.get('failed', 0)} | Skipped: {s.get('skipped', 0)} | Delay: {s.get('min_delay', 60)}-{s.get('max_delay', 120)}s"
@@ -399,7 +373,6 @@ def main_loop():
             log_print(f"LOOP ERROR: {e}")
             time.sleep(3)
 
-# ---------- STARTUP (safe order) ----------
 if __name__ == "__main__":
     start_ping_thread()
     threading.Thread(target=main_loop, daemon=True).start()
